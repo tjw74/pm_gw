@@ -1,0 +1,7 @@
+hzyshd.io {
+    encode gzip zstd
+
+    reverse_proxy /ws 127.0.0.1:8080
+    reverse_proxy /healthz 127.0.0.1:8080
+    reverse_proxy /readyz 127.0.0.1:8080
+}
