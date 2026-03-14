@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::{
     models::normalized::NormalizedEvent,
@@ -129,7 +129,7 @@ async fn handle_value(state: &AppState, value: Value) {
     if let Some(price) = value
         .get("price")
         .or_else(|| value.get("mid"))
-        .and_then(|v| v.as_f64())
+        .and_then(parse_f64)
     {
         state.record_feed_message("polymarket_clob_market", None).await;
         state.update_price("polymarket_clob", price, true).await;
@@ -160,5 +160,33 @@ async fn handle_value(state: &AppState, value: Value) {
         return;
     }
 
-    warn!(payload = %value, "unclassified polymarket market payload");
+    if let Some(price_changes) = value.get("price_changes").and_then(Value::as_array) {
+        state.record_feed_message("polymarket_clob_market", None).await;
+        if let Some(latest_price) = price_changes
+            .iter()
+            .filter_map(|entry| entry.get("price").and_then(parse_f64))
+            .next()
+        {
+            state.update_price("polymarket_clob", latest_price, true).await;
+        }
+        return;
+    }
+
+    if value.get("event_type").and_then(Value::as_str) == Some("last_trade_price") {
+        if let Some(price) = value.get("price").and_then(parse_f64) {
+            state.record_feed_message("polymarket_clob_market", None).await;
+            state.update_price("polymarket_clob", price, true).await;
+            return;
+        }
+    }
+
+    debug!(payload = %value, "ignored polymarket market payload");
+}
+
+fn parse_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
 }
