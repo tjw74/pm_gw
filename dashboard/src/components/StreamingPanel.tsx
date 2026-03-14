@@ -5,7 +5,7 @@ import { formatMs } from "@/lib/utils";
 export function StreamingPanel({ snapshot }: { snapshot: DashboardSnapshot }) {
   const s = snapshot.streaming;
   return (
-    <Card className="xl:col-span-12">
+    <Card className="xl:col-span-6">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Downstream</div>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { ColorType, LineStyle, UTCTimestamp, createChart } from "lightweight-charts";
 import { Card } from "@/components/ui/card";
 import type { DashboardSnapshot } from "@/lib/types";
-import { relativeAgeMs } from "@/lib/utils";
+import { cn, relativeAgeMs } from "@/lib/utils";
 
 const palette = ["#f7931a", "#38bdf8", "#22c55e", "#f59e0b", "#fb7185", "#a78bfa", "#34d399"];
 
@@ -14,7 +14,13 @@ type SeriesMeta = {
   points: Array<{ time: UTCTimestamp; value: number }>;
 };
 
-export function PriceComparisonChart({ snapshot }: { snapshot: DashboardSnapshot }) {
+export function PriceComparisonChart({
+  snapshot,
+  className,
+}: {
+  snapshot: DashboardSnapshot;
+  className?: string;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const seriesData = useMemo<SeriesMeta[]>(() => {
     const feedAgeByAdapter = new Map(snapshot.feeds.map((feed) => [feed.adapter, feed.last_message_age_ms]));
@@ -104,7 +110,7 @@ export function PriceComparisonChart({ snapshot }: { snapshot: DashboardSnapshot
   }, [anchor, seriesData]);
 
   return (
-    <Card className="xl:col-span-7">
+    <Card className={cn("xl:col-span-7", className)}>
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Price alignment</div>

@@ -1,9 +1,9 @@
 import { AlertRail } from "@/components/AlertRail";
 import { DepthChart } from "@/components/DepthChart";
-import { FeedMatrix } from "@/components/FeedMatrix";
 import { HealthStrip } from "@/components/HealthStrip";
 import { PriceComparisonChart } from "@/components/PriceComparisonChart";
 import { StreamingPanel } from "@/components/StreamingPanel";
+import { UpstreamSummaryPanel } from "@/components/UpstreamSummaryPanel";
 import { useDashboardStore } from "@/store/useDashboardStore";
 
 export function OverviewPage() {
@@ -13,11 +13,11 @@ export function OverviewPage() {
     <div className="space-y-4">
       <HealthStrip snapshot={snapshot} />
       <div className="panel-grid">
-        <FeedMatrix feeds={snapshot.feeds} />
-        <AlertRail alerts={snapshot.alerts} />
         <PriceComparisonChart snapshot={snapshot} />
-        <DepthChart orderbook={snapshot.market.orderbook_snapshot} />
+        <DepthChart orderbook={snapshot.market.orderbook_snapshot} className="xl:col-span-5" />
+        <UpstreamSummaryPanel feeds={snapshot.feeds} />
         <StreamingPanel snapshot={snapshot} />
+        <AlertRail alerts={snapshot.alerts} />
       </div>
     </div>
   );

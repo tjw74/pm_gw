@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { Activity, AlertTriangle, CandlestickChart, Gauge, Radio, Shield } from "lucide-react";
+import { Activity, AlertTriangle, CandlestickChart, Gauge, PanelLeftClose, PanelLeftOpen, Radio, Shield } from "lucide-react";
 import { useDashboardStore } from "@/store/useDashboardStore";
 import { Button } from "@/components/ui/button";
 
@@ -19,6 +19,18 @@ export function AppShell() {
   const generatedAt = useDashboardStore((state) => state.publicSnapshot?.meta.generated_at);
   const location = useLocation();
   const scrollKey = `pm_gw_scroll:${location.pathname}`;
+  const [navCollapsed, setNavCollapsed] = useState(false);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("pm_gw_nav_collapsed");
+    if (saved != null) {
+      setNavCollapsed(saved === "true");
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("pm_gw_nav_collapsed", String(navCollapsed));
+  }, [navCollapsed]);
 
   useEffect(() => {
     const restore = sessionStorage.getItem(scrollKey);
@@ -42,40 +54,84 @@ export function AppShell() {
 
   return (
     <div className="mx-auto flex min-h-screen max-w-[1760px] gap-4 px-4 py-4">
-      <aside className="hidden w-60 shrink-0 lg:block">
-        <div className="surface sticky top-4 p-4">
-          <Link to="/" className="flex items-center gap-2.5">
-            <div className="rounded-2xl border border-bitcoin/30 bg-bitcoin/10 p-2.5 text-bitcoin">pm</div>
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Mission Control</div>
-              <div className="mt-0.5 text-base font-semibold">pm_gw</div>
-            </div>
-          </Link>
+      <aside className={`hidden shrink-0 transition-[width] duration-200 lg:block ${navCollapsed ? "w-[72px]" : "w-60"}`}>
+        <div className={`surface sticky top-4 transition-all duration-200 ${navCollapsed ? "p-2.5" : "p-4"}`}>
+          <div className={`flex ${navCollapsed ? "flex-col items-center gap-2" : "items-start justify-between gap-3"}`}>
+            <Link
+              to="/"
+              className={`flex min-w-0 items-center ${navCollapsed ? "justify-center" : "gap-2.5"}`}
+              title="Overview"
+            >
+              <div className="rounded-2xl border border-bitcoin/30 bg-bitcoin/10 p-2.5 text-bitcoin">pm</div>
+              {navCollapsed ? null : (
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Mission Control</div>
+                  <div className="mt-0.5 text-base font-semibold">pm_gw</div>
+                </div>
+              )}
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-10 w-10 rounded-2xl px-0"
+              onClick={() => setNavCollapsed((current) => !current)}
+              aria-label={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+              title={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+            >
+              {navCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </Button>
+          </div>
           <nav className="mt-6 space-y-1.5">
             {nav.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
+                title={item.label}
                 className={({ isActive }) =>
-                  `flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-sm transition ${
-                    isActive ? "bg-white/8 text-foreground" : "text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                  }`
+                  `flex rounded-2xl text-sm transition ${
+                    navCollapsed ? "justify-center px-0 py-2.5" : "items-center gap-2.5 px-3 py-2.5"
+                  } ${isActive ? "bg-white/8 text-foreground" : "text-muted-foreground hover:bg-white/5 hover:text-foreground"}`
                 }
               >
-                <item.icon className="h-4 w-4" />
-                {item.label}
+                <item.icon className="h-4 w-4 shrink-0" />
+                {navCollapsed ? null : item.label}
               </NavLink>
             ))}
           </nav>
-          <div className="mt-6 rounded-2xl border border-white/5 bg-black/20 p-3.5">
-            <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Access</div>
-            <div className="mt-2.5 text-sm text-foreground">{token ? "Admin mode unlocked" : "Public read-only mode"}</div>
-            {token ? (
-              <Button variant="ghost" className="mt-3 w-full" onClick={logout}>Logout</Button>
+          <div className={`mt-6 rounded-2xl border border-white/5 bg-black/20 ${navCollapsed ? "p-2" : "p-3.5"}`}>
+            {navCollapsed ? (
+              <div className="space-y-1.5">
+                <Link
+                  to={token ? "/admin" : "/login"}
+                  title={token ? "Admin mode unlocked" : "Admin login"}
+                  className="flex h-10 items-center justify-center rounded-2xl text-muted-foreground transition hover:bg-white/5 hover:text-foreground"
+                >
+                  <Shield className="h-4 w-4" />
+                </Link>
+                {token ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-10 w-full rounded-2xl px-0"
+                    onClick={logout}
+                    title="Logout"
+                  >
+                    <PanelLeftClose className="h-4 w-4 rotate-180" />
+                  </Button>
+                ) : null}
+              </div>
             ) : (
-              <Link to="/login" className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-2xl bg-accent px-4 text-sm font-medium text-accent-foreground transition hover:bg-accent/90">
-                Admin login
-              </Link>
+              <>
+                <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Access</div>
+                <div className="mt-2.5 text-sm text-foreground">{token ? "Admin mode unlocked" : "Public read-only mode"}</div>
+                {token ? (
+                  <Button variant="ghost" className="mt-3 w-full" onClick={logout}>Logout</Button>
+                ) : (
+                  <Link to="/login" className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-2xl bg-accent px-4 text-sm font-medium text-accent-foreground transition hover:bg-accent/90">
+                    Admin login
+                  </Link>
+                )}
+              </>
             )}
           </div>
         </div>

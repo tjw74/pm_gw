@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import { Card } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 type OrderbookLevel = [number, number];
 type OrderbookSide = OrderbookLevel[];
@@ -230,7 +231,13 @@ function buildDepthSeries(orderbook: unknown): DepthSeries {
   };
 }
 
-export function DepthChart({ orderbook }: { orderbook: unknown }) {
+export function DepthChart({
+  orderbook,
+  className,
+}: {
+  orderbook: unknown;
+  className?: string;
+}) {
   const series = useMemo(() => buildDepthSeries(orderbook), [orderbook]);
   const { bids: rawBids, asks: rawAsks } = useMemo(() => extractBook(orderbook), [orderbook]);
   const hasBook = series.bids.length > 0 && series.asks.length > 0;
@@ -277,7 +284,7 @@ export function DepthChart({ orderbook }: { orderbook: unknown }) {
   }));
 
   return (
-    <Card className="xl:col-span-7">
+    <Card className={cn("xl:col-span-7", className)}>
       <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Microstructure</div>
