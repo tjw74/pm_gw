@@ -106,6 +106,7 @@ pub(crate) mod super_exchange {
                         Message::Text(text) => {
                             let value = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
                             if let Some(event) = normalize_feed_message(name, source, &state, value).await {
+                                state.record_feed_message(state_key, None).await;
                                 if let Some(price) = event.payload.get("price").and_then(parse_f64_value) {
                                     state.update_price(name, price, false).await;
                                 }

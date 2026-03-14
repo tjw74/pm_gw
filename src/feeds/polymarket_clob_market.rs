@@ -35,6 +35,7 @@ pub async fn spawn(state: Arc<AppState>) {
 }
 
 async fn run_once(state: Arc<AppState>) -> anyhow::Result<()> {
+    let subscription = wait_for_subscription_target(&state).await?;
     state
         .record_connection("polymarket_clob_market", ConnectionState::Connecting, None)
         .await;
@@ -43,35 +44,22 @@ async fn run_once(state: Arc<AppState>) -> anyhow::Result<()> {
         .record_connection("polymarket_clob_market", ConnectionState::Connected, None)
         .await;
 
-    let active_market = state.active_market().await;
-    let asset_ids: Vec<String> = active_market
-        .as_ref()
-        .into_iter()
-        .flat_map(|market| [market.yes_token_id.clone(), market.no_token_id.clone()])
-        .flatten()
-        .collect();
-    let subscribe = if asset_ids.is_empty() {
-        json!({
-            "type": "subscribe",
-            "channel": "market",
-            "market": state
-                .active_market_slug()
-                .await
-                .unwrap_or_else(|| state.config.btc_market_seed_slug.clone()),
-        })
-    } else {
-        json!({
-            "assets_ids": asset_ids,
-            "type": "market",
-        })
-    };
+    let subscribe = json!({
+        "assets_ids": subscription.asset_ids,
+        "type": "market",
+    });
     ws.send(Message::Text(subscribe.to_string())).await?;
-    info!("subscribed polymarket market websocket");
+    info!(market = %subscription.slug, "subscribed polymarket market websocket");
 
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
+                let next_market_slug = state.active_market_slug().await;
+                if next_market_slug.as_deref() != Some(subscription.slug.as_str()) {
+                    info!(from = %subscription.slug, to = ?next_market_slug, "active market changed, resubscribing polymarket market websocket");
+                    break;
+                }
                 ws.send(Message::Ping(Vec::new().into())).await?;
             }
             maybe_message = ws.next() => {
@@ -97,6 +85,34 @@ async fn run_once(state: Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct SubscriptionTarget {
+    slug: String,
+    asset_ids: Vec<String>,
+}
+
+async fn wait_for_subscription_target(state: &AppState) -> anyhow::Result<SubscriptionTarget> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if let Some(market) = state.active_market().await {
+            let asset_ids = [market.yes_token_id.clone(), market.no_token_id.clone()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            if asset_ids.len() >= 2 {
+                return Ok(SubscriptionTarget {
+                    slug: market.slug,
+                    asset_ids,
+                });
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for active market token ids");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 async fn handle_text(state: &AppState, text: &str) {
     let value = serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({ "raw": text }));
     handle_value(state, value).await;
@@ -115,6 +131,7 @@ async fn handle_value(state: &AppState, value: Value) {
         .or_else(|| value.get("mid"))
         .and_then(|v| v.as_f64())
     {
+        state.record_feed_message("polymarket_clob_market", None).await;
         state.update_price("polymarket_clob", price, true).await;
         state.broadcaster.publish_event(NormalizedEvent {
             event_type: EventType::PriceTick,
@@ -129,7 +146,8 @@ async fn handle_value(state: &AppState, value: Value) {
     }
 
     if value.get("bids").is_some() || value.get("asks").is_some() {
-        state.set_orderbook(value.clone()).await;
+        state.record_feed_message("polymarket_clob_market", None).await;
+        state.set_orderbook("polymarket_clob_market", value.clone()).await;
         state.broadcaster.publish_event(NormalizedEvent {
             event_type: EventType::OrderBookSnapshot,
             source: PriceSource::PolymarketClob,

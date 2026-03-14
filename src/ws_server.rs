@@ -23,6 +23,7 @@ pub async fn ws_route(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) 
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     if let Err(err) = process_socket(socket, state.clone()).await {
+        state.record_stream_disconnect().await;
         warn!(?err, "websocket connection failed");
     }
 }
@@ -41,6 +42,9 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
         .map_err(|err| GatewayError::bad_request(err.to_string()))?;
     let auth_message = parse_client_message(first)?;
     let ClientMessage::Auth { token } = auth_message else {
+        state
+            .record_auth_failure("first websocket message must be auth")
+            .await;
         let payload = serde_json::to_string(&ServerMessage::AuthError {
             error: "first message must be auth".to_string(),
         })
@@ -52,7 +56,13 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
         return Err(GatewayError::Unauthorized);
     };
 
-    let auth_user = state.auth.verify_token(&token)?;
+    let auth_user = match state.auth.verify_token(&token) {
+        Ok(user) => user,
+        Err(err) => {
+            state.record_auth_failure("invalid gateway token").await;
+            return Err(err);
+        }
+    };
     let session = state.create_session(auth_user.user_id.clone()).await;
     let auth_ok = serde_json::to_string(&ServerMessage::AuthOk {
         session_id: session.id,
@@ -107,13 +117,14 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
                 match result {
                     Ok(event) => {
                         let message = EventBroadcaster::route_event(event);
-                        if send_message(&mut sender, &message).await.is_err() {
+                        if send_message(&mut sender, &state, &message).await.is_err() {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        state.record_stream_drop().await;
                         let snapshot = snapshot_rx.borrow().clone();
-                        if send_message(&mut sender, &ServerMessage::Snapshot { payload: snapshot }).await.is_err() {
+                        if send_message(&mut sender, &state, &ServerMessage::Snapshot { payload: snapshot }).await.is_err() {
                             break;
                         }
                     }
@@ -125,7 +136,7 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
                     break;
                 }
                 let payload = snapshot_rx.borrow().clone();
-                if send_message(&mut sender, &ServerMessage::Snapshot { payload }).await.is_err() {
+                if send_message(&mut sender, &state, &ServerMessage::Snapshot { payload }).await.is_err() {
                     break;
                 }
             }
@@ -171,11 +182,13 @@ async fn route_command(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> Result<(), GatewayError> {
     if let (Some(command_id), Some(timestamp)) = (command.command_id(), command.timestamp()) {
+        state.record_command_latency(timestamp).await;
         state
             .validate_command(&auth_user.user_id, command_id, timestamp)
             .await?;
         send_message(
             sender,
+            state,
             &ServerMessage::CommandAck {
                 command_id,
                 accepted_at: time::OffsetDateTime::now_utc(),
@@ -197,6 +210,7 @@ async fn route_command(
             state.subscribe_market(session.id, target_market).await;
             send_message(
                 sender,
+                state,
                 &ServerMessage::Snapshot {
                     payload: state.snapshot().await,
                 },
@@ -216,6 +230,7 @@ async fn route_command(
         ClientMessage::GetOpenOrders { .. } => {
             send_message(
                 sender,
+                state,
                 &ServerMessage::OrderUpdate {
                     payload: execution
                         .handle_command(&auth_user.user_id, &command)
@@ -227,6 +242,7 @@ async fn route_command(
         ClientMessage::GetPositions { .. } => {
             send_message(
                 sender,
+                state,
                 &ServerMessage::PositionUpdate {
                     payload: execution
                         .handle_command(&auth_user.user_id, &command)
@@ -239,17 +255,18 @@ async fn route_command(
             let payload = execution
                 .handle_command(&auth_user.user_id, &command)
                 .await?;
-            send_message(sender, &ServerMessage::AccountUpdate { payload }).await
+            send_message(sender, state, &ServerMessage::AccountUpdate { payload }).await
         }
         ClientMessage::SetTargetPrice { .. } => {
             let payload = execution
                 .handle_command(&auth_user.user_id, &command)
                 .await?;
-            send_message(sender, &ServerMessage::Snapshot { payload }).await
+            send_message(sender, state, &ServerMessage::Snapshot { payload }).await
         }
         ClientMessage::Ping { .. } => {
             send_message(
                 sender,
+                state,
                 &ServerMessage::Heartbeat {
                     timestamp: time::OffsetDateTime::now_utc(),
                 },
@@ -263,7 +280,7 @@ async fn route_command(
             let payload = execution
                 .handle_command(&auth_user.user_id, &command)
                 .await?;
-            send_message(sender, &ServerMessage::OrderUpdate { payload }).await
+            send_message(sender, state, &ServerMessage::OrderUpdate { payload }).await
         }
         ClientMessage::Auth { .. } => Err(GatewayError::Unauthorized),
     }
@@ -284,10 +301,12 @@ fn parse_client_message(message: Message) -> Result<ClientMessage, GatewayError>
 
 async fn send_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    state: &Arc<AppState>,
     message: &ServerMessage,
 ) -> Result<(), GatewayError> {
     let payload =
         serde_json::to_string(message).map_err(|err| GatewayError::internal(err.to_string()))?;
+    state.record_stream_outbound(payload.len()).await;
     sender
         .send(Message::Text(payload.into()))
         .await

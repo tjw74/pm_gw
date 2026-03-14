@@ -16,6 +16,7 @@ async fn probe_gamma(state: Arc<AppState>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("{}/markets?limit=1", state.config.poly_gamma_base_url);
     let _ = client.get(url).send().await?;
+    state.record_feed_message("polymarket_gamma", None).await;
     state
         .record_connection(
             "polymarket_gamma",

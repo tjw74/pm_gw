@@ -118,6 +118,9 @@ async fn handle_user_message(state: &AppState, user_id: &str, text: &str) {
             return;
         }
     };
+    state
+        .record_feed_message(&format!("polymarket_clob_user_{user_id}"), None)
+        .await;
 
     state.broadcaster.publish_event(NormalizedEvent {
         event_type,

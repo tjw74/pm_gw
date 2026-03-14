@@ -21,6 +21,7 @@ use crate::{
         market::ActiveMarket,
         order::OrderState,
     },
+    observability::ObservabilityState,
     session::Session,
     types::{ConnectionState, EventType, PriceSource},
 };
@@ -33,6 +34,7 @@ pub struct AppState {
     core_started: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     inner: Arc<RwLock<GatewayState>>,
+    ops: Arc<RwLock<ObservabilityState>>,
 }
 
 #[derive(Default)]
@@ -83,6 +85,7 @@ impl AppState {
                 positions,
                 ..GatewayState::default()
             })),
+            ops: Arc::new(RwLock::new(ObservabilityState::default())),
         }
     }
 
@@ -104,6 +107,10 @@ impl AppState {
             let mut inner = self.inner.write().await;
             inner.connections.insert(adapter.to_string(), state);
         }
+        self.ops
+            .write()
+            .await
+            .record_connection(adapter, state, detail.clone());
         self.broadcaster
             .publish_event(crate::models::normalized::NormalizedEvent {
                 event_type: EventType::ConnectionStatus,
@@ -153,6 +160,7 @@ impl AppState {
     }
 
     pub async fn update_price(&self, source: &str, price: f64, market_price: bool) {
+        let now = OffsetDateTime::now_utc();
         {
             let mut inner = self.inner.write().await;
             if market_price {
@@ -166,11 +174,20 @@ impl AppState {
                 .last_trade_per_source
                 .insert(source.to_string(), price);
         }
+        {
+            let mut ops = self.ops.write().await;
+            ops.record_feed_message(source, now, Some(0));
+            ops.record_price(source, price, now);
+        }
         self.refresh_snapshot().await;
     }
 
-    pub async fn set_orderbook(&self, snapshot: serde_json::Value) {
+    pub async fn set_orderbook(&self, source: &str, snapshot: serde_json::Value) {
         self.inner.write().await.orderbook_snapshot = Some(snapshot);
+        self.ops
+            .write()
+            .await
+            .record_feed_message(source, OffsetDateTime::now_utc(), Some(0));
         self.refresh_snapshot().await;
     }
 
@@ -243,7 +260,7 @@ impl AppState {
     }
 
     pub async fn enforce_risk(&self, size: f64, price: Option<f64>) -> Result<(), GatewayError> {
-        if self.config.enable_kill_switch {
+        if self.config.enable_kill_switch || self.runtime_kill_switch().await {
             return Err(GatewayError::Forbidden("kill switch enabled".to_string()));
         }
         if let Some(max_size) = self.config.optional_max_order_size {
@@ -270,6 +287,7 @@ impl AppState {
 
     pub async fn snapshot(&self) -> serde_json::Value {
         let inner = self.inner.read().await;
+        let ops = self.ops.read().await;
         json!({
             "active_market": inner.active_market,
             "latest_market_price": inner.latest_market_price,
@@ -281,6 +299,7 @@ impl AppState {
             "positions": inner.positions,
             "connections": inner.connections,
             "target_price": inner.target_price,
+            "runtime_kill_switch": ops.runtime_kill_switch,
         })
     }
 
@@ -324,6 +343,341 @@ impl AppState {
         );
         inner.active_orders.insert(user_id.to_string(), orders);
         inner.positions.insert(user_id.to_string(), positions);
+    }
+
+    pub async fn record_feed_message(
+        &self,
+        adapter: &str,
+        source_timestamp: Option<OffsetDateTime>,
+    ) {
+        let observed_at = OffsetDateTime::now_utc();
+        let latency_ms = source_timestamp.map(|ts| (observed_at - ts).whole_milliseconds() as i64);
+        self.ops
+            .write()
+            .await
+            .record_feed_message(adapter, observed_at, latency_ms);
+    }
+
+    pub async fn record_stream_outbound(&self, bytes: usize) {
+        self.ops.write().await.record_outbound(bytes);
+    }
+
+    pub async fn record_stream_drop(&self) {
+        self.ops.write().await.record_drop();
+    }
+
+    pub async fn record_auth_failure(&self, reason: &str) {
+        let mut ops = self.ops.write().await;
+        ops.record_auth_failure();
+        ops.push_audit("anonymous", "auth_failure", reason);
+    }
+
+    pub async fn record_stream_disconnect(&self) {
+        self.ops.write().await.record_disconnect();
+    }
+
+    pub async fn record_command_latency(&self, timestamp: OffsetDateTime) {
+        let now = OffsetDateTime::now_utc();
+        let latency = (now - timestamp).whole_milliseconds().max(0) as u64;
+        self.ops.write().await.record_command_latency(latency);
+    }
+
+    pub async fn runtime_kill_switch(&self) -> bool {
+        self.ops.read().await.runtime_kill_switch
+    }
+
+    pub async fn set_runtime_kill_switch(&self, enabled: bool, actor: &str) {
+        let mut ops = self.ops.write().await;
+        ops.runtime_kill_switch = enabled;
+        ops.push_audit(
+            actor.to_string(),
+            "set_runtime_kill_switch",
+            format!("enabled={enabled}"),
+        );
+    }
+
+    pub async fn push_audit(&self, actor: &str, action: &str, detail: &str) {
+        self.ops
+            .write()
+            .await
+            .push_audit(actor.to_string(), action.to_string(), detail.to_string());
+    }
+
+    pub async fn public_dashboard_snapshot(&self) -> serde_json::Value {
+        let inner = self.inner.read().await;
+        let ops = self.ops.read().await;
+        let feeds = build_feed_status(&inner, &ops);
+        let alerts = build_alerts(&inner, &ops, self.is_ready());
+        let connected_feeds = feeds
+            .iter()
+            .filter(|feed| feed["connection"] == serde_json::Value::String("connected".to_string()))
+            .count();
+        let client_count = inner.sessions.len();
+        let outbound_messages_per_sec = ops.streaming.outbound_samples.len() as u64;
+        let outbound_bytes_per_sec: u64 = ops.streaming.outbound_samples.iter().map(|(_, size)| *size as u64).sum();
+        let avg_command_latency_ms = average_u64(
+            ops.streaming
+                .command_samples_ms
+                .iter()
+                .map(|(_, value)| *value),
+        );
+        json!({
+            "meta": {
+                "version": self.config.build_version,
+                "commit": self.config.build_commit,
+                "uptime_seconds": (OffsetDateTime::now_utc() - ops.started_at).whole_seconds().max(0),
+                "generated_at": OffsetDateTime::now_utc(),
+                "ready": self.is_ready(),
+            },
+            "global": {
+                "gateway": if self.is_ready() { "up" } else { "degraded" },
+                "overall_health": overall_health(&alerts),
+                "active_market_family": "BTC 5m",
+                "active_market_slug": inner.active_market.as_ref().map(|market| market.slug.clone()),
+                "window_countdown_seconds": inner.active_market.as_ref().map(|market| (market.window.window_end - OffsetDateTime::now_utc()).whole_seconds().max(0)),
+                "upstreams_connected": connected_feeds,
+                "upstreams_total": feeds.len(),
+                "downstream_clients": client_count,
+                "alert_level": overall_health(&alerts),
+            },
+            "feeds": feeds,
+            "market": {
+                "active": inner.active_market,
+                "target_price": inner.target_price,
+                "latest_market_price": inner.latest_market_price,
+                "latest_reference_prices": inner.latest_reference_prices,
+                "price_history": ops.price_history,
+                "orderbook_snapshot": inner.orderbook_snapshot,
+            },
+            "streaming": {
+                "active_clients": client_count,
+                "authenticated_clients": client_count,
+                "outbound_messages_per_sec": outbound_messages_per_sec,
+                "outbound_bytes_per_sec": outbound_bytes_per_sec,
+                "dropped_messages_total": ops.streaming.dropped_messages,
+                "auth_failures_total": ops.streaming.auth_failures,
+                "disconnects_total": ops.streaming.disconnects,
+                "avg_command_latency_ms": avg_command_latency_ms,
+                "sessions": inner.sessions.values().cloned().collect::<Vec<_>>(),
+            },
+            "alerts": alerts,
+            "logs": ops.audit_log.iter().take(50).cloned().collect::<Vec<_>>(),
+        })
+    }
+
+    pub async fn admin_dashboard_snapshot(&self) -> serde_json::Value {
+        let public = self.public_dashboard_snapshot().await;
+        let inner = self.inner.read().await;
+        let ops = self.ops.read().await;
+        json!({
+            "public": public,
+            "admin": {
+                "runtime_kill_switch": ops.runtime_kill_switch,
+                "accounts": inner.accounts,
+                "active_orders": inner.active_orders,
+                "positions": inner.positions,
+                "audit": ops.audit_log,
+            }
+        })
+    }
+}
+
+fn build_feed_status(inner: &GatewayState, ops: &ObservabilityState) -> Vec<serde_json::Value> {
+    let now = OffsetDateTime::now_utc();
+    let uptime_ms = (now - ops.started_at).whole_milliseconds().max(0) as i64;
+    let mut adapters = ops.feed_stats.keys().cloned().collect::<Vec<_>>();
+    adapters.sort();
+    adapters
+        .into_iter()
+        .map(|adapter| {
+            let feed = ops.feed_stats.get(&adapter).expect("feed exists");
+            let last_message_age_ms = feed
+                .last_message_at
+                .map(|ts| (now - ts).whole_milliseconds().max(0) as i64);
+            json!({
+                "adapter": adapter,
+                "connection": feed.connection,
+                "last_message_at": feed.last_message_at,
+                "last_message_age_ms": last_message_age_ms,
+                "reconnect_count": feed.reconnect_count,
+                "message_rate_per_sec": feed.messages.len(),
+                "recent_disconnects_60s": feed.disconnects.len(),
+                "last_latency_ms": feed.last_latency_ms,
+                "last_error": feed.last_error,
+                "stale": is_stale(&adapter, feed.connection, last_message_age_ms, uptime_ms),
+                "connection_detail": inner.connections.get(&feed.adapter),
+                "freshness_expected": feed_freshness_policy(&adapter).threshold_ms.is_some(),
+            })
+        })
+        .collect()
+}
+
+fn build_alerts(
+    inner: &GatewayState,
+    ops: &ObservabilityState,
+    ready: bool,
+) -> Vec<serde_json::Value> {
+    let now = OffsetDateTime::now_utc();
+    let uptime_ms = (now - ops.started_at).whole_milliseconds().max(0) as i64;
+    let mut alerts = Vec::new();
+    if !ready {
+        alerts.push(json!({
+            "id": "gateway_not_ready",
+            "severity": "critical",
+            "title": "Gateway not ready",
+            "detail": "Core services have not reached ready state",
+            "timestamp": now,
+        }));
+    }
+    if inner.active_market.is_none() {
+        alerts.push(json!({
+            "id": "missing_active_market",
+            "severity": "critical",
+            "title": "No active market selected",
+            "detail": "Scheduler has not resolved an active BTC market window",
+            "timestamp": now,
+        }));
+    }
+    for (adapter, feed) in &ops.feed_stats {
+        let age_ms = feed
+            .last_message_at
+            .map(|ts| (now - ts).whole_milliseconds().max(0) as i64);
+        if matches!(feed.connection, ConnectionState::Disconnected) {
+            alerts.push(json!({
+                "id": format!("{adapter}_disconnected"),
+                "severity": "critical",
+                "title": format!("{adapter} disconnected"),
+                "detail": feed.last_error.clone().unwrap_or_else(|| "Upstream connection is down".to_string()),
+                "timestamp": now,
+            }));
+        } else if matches!(feed.connection, ConnectionState::Degraded) || is_stale(adapter, feed.connection, age_ms, uptime_ms) {
+            let detail = if matches!(feed.connection, ConnectionState::Degraded) {
+                feed.last_error.clone().unwrap_or_else(|| "Feed is connected but currently degraded".to_string())
+            } else if let Some(age_ms) = age_ms {
+                format!("Last message age: {age_ms} ms")
+            } else {
+                let policy = feed_freshness_policy(adapter);
+                format!(
+                    "No fresh messages observed after {} ms startup grace",
+                    policy.startup_grace_ms
+                )
+            };
+            alerts.push(json!({
+                "id": format!("{adapter}_stale"),
+                "severity": "warning",
+                "title": format!("{adapter} stale"),
+                "detail": detail,
+                "timestamp": now,
+            }));
+        } else if feed.disconnects.len() >= 3 {
+            alerts.push(json!({
+                "id": format!("{adapter}_reconnect_storm"),
+                "severity": "warning",
+                "title": format!("{adapter} reconnect storm"),
+                "detail": format!("{} disconnects in the last minute", feed.disconnects.len()),
+                "timestamp": now,
+            }));
+        }
+    }
+    if ops.streaming.dropped_messages > 0 {
+        alerts.push(json!({
+            "id": "downstream_drops",
+            "severity": "warning",
+            "title": "Downstream backpressure",
+            "detail": format!("{} outbound messages dropped", ops.streaming.dropped_messages),
+            "timestamp": now,
+        }));
+    }
+    if ops.runtime_kill_switch {
+        alerts.push(json!({
+            "id": "runtime_kill_switch",
+            "severity": "warning",
+            "title": "Runtime kill switch enabled",
+            "detail": "Order placement is blocked by operator control",
+            "timestamp": now,
+        }));
+    }
+    alerts
+}
+
+#[derive(Clone, Copy)]
+struct FeedFreshnessPolicy {
+    threshold_ms: Option<i64>,
+    startup_grace_ms: i64,
+}
+
+fn feed_freshness_policy(adapter: &str) -> FeedFreshnessPolicy {
+    if adapter.contains("polymarket_clob_user") || adapter.contains("polymarket_gamma") || adapter.contains("market_scheduler") {
+        FeedFreshnessPolicy {
+            threshold_ms: None,
+            startup_grace_ms: 0,
+        }
+    } else if adapter.contains("bitstamp") {
+        FeedFreshnessPolicy {
+            threshold_ms: Some(150_000),
+            startup_grace_ms: 90_000,
+        }
+    } else if adapter.contains("polymarket_clob_market") {
+        FeedFreshnessPolicy {
+            threshold_ms: Some(60_000),
+            startup_grace_ms: 45_000,
+        }
+    } else if adapter.contains("rtds") {
+        FeedFreshnessPolicy {
+            threshold_ms: Some(45_000),
+            startup_grace_ms: 45_000,
+        }
+    } else {
+        FeedFreshnessPolicy {
+            threshold_ms: Some(45_000),
+            startup_grace_ms: 30_000,
+        }
+    }
+}
+
+fn is_stale(
+    adapter: &str,
+    connection: ConnectionState,
+    age_ms: Option<i64>,
+    uptime_ms: i64,
+) -> bool {
+    let policy = feed_freshness_policy(adapter);
+    let Some(threshold_ms) = policy.threshold_ms else {
+        return false;
+    };
+    if matches!(connection, ConnectionState::Connecting | ConnectionState::Disconnected) {
+        return false;
+    }
+    match age_ms {
+        Some(age_ms) => age_ms > threshold_ms,
+        None => uptime_ms > policy.startup_grace_ms,
+    }
+}
+
+fn overall_health(alerts: &[serde_json::Value]) -> &'static str {
+    if alerts
+        .iter()
+        .any(|alert| alert.get("severity").and_then(serde_json::Value::as_str) == Some("critical"))
+    {
+        "critical"
+    } else if !alerts.is_empty() {
+        "warning"
+    } else {
+        "healthy"
+    }
+}
+
+fn average_u64(values: impl Iterator<Item = u64>) -> Option<u64> {
+    let mut total = 0u64;
+    let mut count = 0u64;
+    for value in values {
+        total += value;
+        count += 1;
+    }
+    if count > 0 {
+        Some(total / count)
+    } else {
+        None
     }
 }
 

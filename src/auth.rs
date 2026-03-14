@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ethers_core::types::{
     Address, H256, U256,
@@ -12,7 +13,8 @@ use ethers_core::types::{
 use ethers_core::utils::to_checksum;
 use ethers_signers::{LocalWallet, Signer};
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use time::OffsetDateTime;
 use tracing::info;
@@ -30,6 +32,11 @@ const ATTEST_MESSAGE: &str = "This message attests that I control the given wall
 #[derive(Clone, Debug)]
 pub struct AuthenticatedUser {
     pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthenticatedAdmin {
+    pub username: String,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +58,17 @@ pub struct AuthService {
     secret: Arc<Vec<u8>>,
     token_users: Arc<HashMap<String, String>>,
     polymarket_users: Arc<HashMap<String, PolymarketUserContext>>,
+    admin_username: Arc<String>,
+    admin_password_hash: Arc<String>,
+    admin_encoding_key: Arc<EncodingKey>,
+    admin_decoding_key: Arc<DecodingKey>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AdminClaims {
+    sub: String,
+    role: String,
+    exp: usize,
 }
 
 impl AuthService {
@@ -72,6 +90,14 @@ impl AuthService {
             secret: Arc::new(config.auth_secret.as_bytes().to_vec()),
             token_users: Arc::new(token_users),
             polymarket_users: Arc::new(polymarket_users),
+            admin_username: Arc::new(config.admin_username.clone()),
+            admin_password_hash: Arc::new(config.admin_password_hash.clone()),
+            admin_encoding_key: Arc::new(EncodingKey::from_secret(
+                config.admin_jwt_secret.as_bytes(),
+            )),
+            admin_decoding_key: Arc::new(DecodingKey::from_secret(
+                config.admin_jwt_secret.as_bytes(),
+            )),
         })
     }
 
@@ -120,6 +146,40 @@ impl AuthService {
             .get(user_id)
             .cloned()
             .ok_or(GatewayError::Unauthorized)
+    }
+
+    pub fn admin_login(&self, username: &str, password: &str) -> Result<String, GatewayError> {
+        if username != self.admin_username.as_str() {
+            return Err(GatewayError::Unauthorized);
+        }
+        let password_hash =
+            PasswordHash::new(self.admin_password_hash.as_str()).map_err(|_| GatewayError::Unauthorized)?;
+        Argon2::default()
+            .verify_password(password.as_bytes(), &password_hash)
+            .map_err(|_| GatewayError::Unauthorized)?;
+
+        let claims = AdminClaims {
+            sub: username.to_string(),
+            role: "admin".to_string(),
+            exp: (OffsetDateTime::now_utc() + time::Duration::hours(12)).unix_timestamp() as usize,
+        };
+        encode(&Header::default(), &claims, &self.admin_encoding_key)
+            .map_err(|err| GatewayError::internal(err.to_string()))
+    }
+
+    pub fn verify_admin_token(&self, token: &str) -> Result<AuthenticatedAdmin, GatewayError> {
+        let data = decode::<AdminClaims>(
+            token,
+            &self.admin_decoding_key,
+            &Validation::default(),
+        )
+        .map_err(|_| GatewayError::Unauthorized)?;
+        if data.claims.role != "admin" {
+            return Err(GatewayError::Unauthorized);
+        }
+        Ok(AuthenticatedAdmin {
+            username: data.claims.sub,
+        })
     }
 }
 

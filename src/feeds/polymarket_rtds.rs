@@ -87,6 +87,7 @@ async fn handle_text(state: &AppState, text: &str) {
         .or_else(|| value.get("p"))
         .and_then(|v| v.as_f64())
     {
+        state.record_feed_message("polymarket_rtds", None).await;
         state.update_price("polymarket_rtds", price, false).await;
         state.broadcaster.publish_event(NormalizedEvent {
             event_type: EventType::PriceTick,

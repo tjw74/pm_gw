@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, bail};
+use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+use sha2::{Digest, Sha256};
 use serde::Serialize;
 use std::{env, time::Duration};
 use tracing::info;
@@ -8,7 +10,12 @@ pub struct Config {
     pub server_host: String,
     pub server_port: u16,
     pub log_level: String,
+    pub build_version: String,
+    pub build_commit: String,
     pub auth_secret: String,
+    pub admin_username: String,
+    pub admin_password_hash: String,
+    pub admin_jwt_secret: String,
     pub poly_gamma_base_url: String,
     pub poly_clob_base_url: String,
     pub poly_data_api_base_url: String,
@@ -62,7 +69,12 @@ impl Config {
         let server_host = env_string("SERVER_HOST", "127.0.0.1");
         let server_port = env_u16("SERVER_PORT", 8080)?;
         let log_level = env_string("LOG_LEVEL", "info");
+        let build_version = env!("CARGO_PKG_VERSION").to_string();
+        let build_commit = option_env!("BUILD_COMMIT").unwrap_or("unknown").to_string();
         let auth_secret = env_required("AUTH_SECRET")?;
+        let admin_username = env_string("ADMIN_USERNAME", "admin");
+        let admin_password_hash = env_admin_password_hash(&auth_secret)?;
+        let admin_jwt_secret = env_required("ADMIN_JWT_SECRET")?;
         let poly_gamma_base_url =
             env_string("POLY_GAMMA_BASE_URL", "https://gamma-api.polymarket.com");
         let poly_clob_base_url = env_string("POLY_CLOB_BASE_URL", "https://clob.polymarket.com");
@@ -91,7 +103,12 @@ impl Config {
             server_host,
             server_port,
             log_level,
+            build_version,
+            build_commit,
             auth_secret,
+            admin_username,
+            admin_password_hash,
+            admin_jwt_secret,
             poly_gamma_base_url,
             poly_clob_base_url,
             poly_data_api_base_url,
@@ -215,6 +232,23 @@ fn env_opt_u32(name: &str) -> Result<Option<u32>> {
         .filter(|v| !v.trim().is_empty())
         .map(|v| v.parse().with_context(|| format!("invalid u32 in {name}")))
         .transpose()
+}
+
+fn env_admin_password_hash(auth_secret: &str) -> Result<String> {
+    if let Ok(value) = env::var("ADMIN_PASSWORD_HASH") {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+    let password = env::var("ADMIN_PASSWORD")
+        .with_context(|| "missing required env var ADMIN_PASSWORD_HASH or ADMIN_PASSWORD")?;
+    let digest = Sha256::digest(auth_secret.as_bytes());
+    let salt = SaltString::encode_b64(&digest[..16])
+        .map_err(|err| anyhow::anyhow!("invalid derived admin salt: {err}"))?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|err| anyhow::anyhow!("failed to derive admin password hash: {err}"))
 }
 
 trait Pipe: Sized {

@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --background: 222 31% 7%;
+  --foreground: 210 18% 92%;
+  --card: 223 24% 10%;
+  --card-foreground: 210 18% 92%;
+  --border: 220 17% 18%;
+  --muted: 221 17% 14%;
+  --muted-foreground: 214 10% 64%;
+  --accent: 216 85% 58%;
+  --accent-foreground: 210 40% 98%;
+  --success: 152 53% 50%;
+  --warning: 40 88% 56%;
+  --danger: 0 74% 60%;
+  --bitcoin: 30 95% 57%;
+}
+
+* {
+  @apply border-border;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  background-image:
+    radial-gradient(circle at top right, rgba(247, 147, 26, 0.14), transparent 28%),
+    radial-gradient(circle at bottom left, rgba(36, 97, 194, 0.12), transparent 26%);
+}
+
+#root {
+  @apply min-h-screen;
+}
+
+.panel-grid {
+  @apply grid gap-4 xl:grid-cols-12;
+}
+
+.surface {
+  @apply rounded-3xl border border-white/5 bg-card/90 shadow-panel backdrop-blur;
+}
