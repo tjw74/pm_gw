@@ -26,7 +26,7 @@ type DistributionSeries = {
 
 const VIEWBOX_WIDTH = 720;
 const VIEWBOX_HEIGHT = 260;
-const MARGIN = { top: 12, right: 10, bottom: 28, left: 10 };
+const MARGIN = { top: 12, right: 20, bottom: 40, left: 22 };
 const PLOT_WIDTH = VIEWBOX_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEWBOX_HEIGHT - MARGIN.top - MARGIN.bottom;
 const LADDER_BUCKET_SIZE = 0.01;
@@ -226,7 +226,7 @@ export function DepthChart({
                 stroke="rgba(255,255,255,0.06)"
                 strokeDasharray="3 6"
               />
-              <text x={MARGIN.left + 4} y={tick.y - 4} fill="rgba(255,255,255,0.45)" fontSize="10">
+              <text x={MARGIN.left - 8} y={tick.y + 3} fill="rgba(255,255,255,0.55)" fontSize="11" textAnchor="end">
                 {formatVolume(tick.value)}
               </text>
             </g>
@@ -278,27 +278,27 @@ export function DepthChart({
 
           <text
             x={series.bestBid != null ? projectX(series.bestBid) : MARGIN.left}
-            y={VIEWBOX_HEIGHT - 8}
+            y={VIEWBOX_HEIGHT - 12}
             fill="rgba(255,255,255,0.7)"
-            fontSize="10"
+            fontSize="12"
             textAnchor="end"
           >
             {series.bestBid?.toFixed(4) ?? "--"}
           </text>
           <text
             x={centerX}
-            y={VIEWBOX_HEIGHT - 8}
+            y={VIEWBOX_HEIGHT - 12}
             fill="rgba(255,255,255,0.55)"
-            fontSize="10"
+            fontSize="12"
             textAnchor="middle"
           >
             {mid != null ? `Mid ${mid.toFixed(4)}` : "Mid"}
           </text>
           <text
             x={series.bestAsk != null ? projectX(series.bestAsk) : VIEWBOX_WIDTH - MARGIN.right}
-            y={VIEWBOX_HEIGHT - 8}
+            y={VIEWBOX_HEIGHT - 12}
             fill="rgba(255,255,255,0.7)"
-            fontSize="10"
+            fontSize="12"
             textAnchor="start"
           >
             {series.bestAsk?.toFixed(4) ?? "--"}
@@ -378,8 +378,8 @@ function LadderColumn({
   buckets: LadderBucket[];
   maxBucketSize: number;
 }) {
-  const fillClass =
-    side === "bids" ? "bg-emerald-500/18 border-emerald-400/20" : "bg-rose-500/18 border-rose-400/20";
+  const fillClass = side === "bids" ? "bg-emerald-500/70" : "bg-rose-500/70";
+  const railClass = side === "bids" ? "bg-emerald-500/8" : "bg-rose-500/8";
 
   return (
     <div className="rounded-2xl border border-white/5 bg-black/10 p-2.5">
@@ -388,12 +388,14 @@ function LadderColumn({
         {buckets.map((bucket) => {
           const width = `${Math.max((bucket.totalSize / maxBucketSize) * 100, 4)}%`;
           return (
-            <div key={`${side}-${bucket.price}`} className="grid grid-cols-[72px_1fr_72px] items-center gap-2 text-xs">
+            <div key={`${side}-${bucket.price}`} className="grid grid-cols-[56px_1fr] items-center gap-2 text-xs">
               <div className="text-muted-foreground">{bucket.price.toFixed(2)}</div>
-              <div className="relative h-6 overflow-hidden rounded-xl border border-white/5 bg-white/[0.03]">
-                <div className={`absolute inset-y-0 ${side === "bids" ? "right-0" : "left-0"} rounded-xl border ${fillClass}`} style={{ width }} />
+              <div className={`relative h-6 overflow-hidden rounded-md border border-white/5 ${railClass}`}>
+                <div className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width }} />
+                <div className="absolute inset-0 flex items-center justify-end px-2 text-foreground">
+                  {formatVolume(bucket.totalSize)}
+                </div>
               </div>
-              <div className="text-right text-foreground">{formatVolume(bucket.totalSize)}</div>
             </div>
           );
         })}

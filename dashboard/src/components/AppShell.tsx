@@ -62,18 +62,14 @@ export function AppShell() {
               className={`flex min-w-0 items-center ${navCollapsed ? "justify-center" : "gap-2.5"}`}
               title="Overview"
             >
-              <div className="rounded-2xl border border-bitcoin/30 bg-bitcoin/10 p-2.5 text-bitcoin">pm</div>
-              {navCollapsed ? null : (
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Mission Control</div>
-                  <div className="mt-0.5 text-base font-semibold">pm_gw</div>
-                </div>
-              )}
+              <div className="rounded-2xl border border-bitcoin/30 bg-bitcoin/10 px-2.5 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-bitcoin">
+                PMGW
+              </div>
             </Link>
             <Button
               variant="ghost"
               size="sm"
-              className="h-10 w-10 rounded-2xl px-0"
+              className="h-10 w-10 rounded-2xl border-0 px-0 shadow-none"
               onClick={() => setNavCollapsed((current) => !current)}
               aria-label={navCollapsed ? "Expand navigation" : "Collapse navigation"}
               title={navCollapsed ? "Expand navigation" : "Collapse navigation"}
