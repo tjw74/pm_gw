@@ -2,28 +2,24 @@ import { useMemo } from "react";
 
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import type { DashboardSnapshot } from "@/lib/types";
 
 type OrderbookLevel = [number, number];
 type OrderbookSide = OrderbookLevel[];
-
-type DepthPoint = {
-  price: number;
-  cumulative: number;
-};
 
 type LadderBucket = {
   price: number;
   totalSize: number;
 };
 
-type DepthSeries = {
-  bids: DepthPoint[];
-  asks: DepthPoint[];
+type DistributionSeries = {
+  bids: LadderBucket[];
+  asks: LadderBucket[];
   bestBid: number | null;
   bestAsk: number | null;
   midPrice: number | null;
   maxDistanceFromMid: number;
-  maxDepth: number;
+  maxSize: number;
   bidLevels: number;
   askLevels: number;
 };
@@ -33,9 +29,9 @@ const VIEWBOX_HEIGHT = 260;
 const MARGIN = { top: 12, right: 10, bottom: 28, left: 10 };
 const PLOT_WIDTH = VIEWBOX_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEWBOX_HEIGHT - MARGIN.top - MARGIN.bottom;
-const MAX_RENDER_POINTS_PER_SIDE = 220;
 const LADDER_BUCKET_SIZE = 0.01;
 const LADDER_BUCKET_ROWS = 10;
+const CHART_BUCKET_ROWS = 28;
 
 function normalizeSide(raw: unknown): OrderbookSide {
   if (!Array.isArray(raw)) return [];
@@ -63,93 +59,6 @@ function extractBook(orderbook: unknown) {
   return { bids, asks };
 }
 
-function buildCumulativeBids(levels: OrderbookSide): DepthPoint[] {
-  const sorted = [...levels].sort((a, b) => b[0] - a[0]);
-  let cumulative = 0;
-  return sorted.map(([price, size]) => {
-    cumulative += size;
-    return { price, cumulative };
-  });
-}
-
-function buildCumulativeAsks(levels: OrderbookSide): DepthPoint[] {
-  const sorted = [...levels].sort((a, b) => a[0] - b[0]);
-  let cumulative = 0;
-  return sorted.map(([price, size]) => {
-    cumulative += size;
-    return { price, cumulative };
-  });
-}
-
-function compressDepthPoints(
-  points: DepthPoint[],
-  projectX: (price: number) => number,
-  side: "bids" | "asks",
-) {
-  if (points.length <= MAX_RENDER_POINTS_PER_SIDE) {
-    return points;
-  }
-
-  const compressed: DepthPoint[] = [];
-  let lastBucket: number | null = null;
-
-  for (const point of points) {
-    const x = projectX(point.price);
-    const bucket = Math.round((x / PLOT_WIDTH) * MAX_RENDER_POINTS_PER_SIDE);
-    if (bucket === lastBucket) {
-      compressed[compressed.length - 1] = point;
-      continue;
-    }
-    compressed.push(point);
-    lastBucket = bucket;
-  }
-
-  const first = points[0];
-  const last = points[points.length - 1];
-  if (compressed[0]?.price !== first.price) {
-    compressed.unshift(first);
-  }
-  if (compressed[compressed.length - 1]?.price !== last.price) {
-    compressed.push(last);
-  }
-
-  return side === "bids" ? compressed.sort((a, b) => b.price - a.price) : compressed.sort((a, b) => a.price - b.price);
-}
-
-function buildStepAreaPath(
-  points: DepthPoint[],
-  projectX: (price: number) => number,
-  projectY: (depth: number) => number,
-) {
-  if (!points.length) return "";
-
-  const first = points[0];
-  let path = `M ${projectX(first.price)} ${VIEWBOX_HEIGHT - MARGIN.bottom} L ${projectX(first.price)} ${projectY(first.cumulative)}`;
-  for (let index = 1; index < points.length; index += 1) {
-    const point = points[index];
-    path += ` H ${projectX(point.price)} V ${projectY(point.cumulative)}`;
-  }
-  const last = points[points.length - 1];
-  path += ` L ${projectX(last.price)} ${VIEWBOX_HEIGHT - MARGIN.bottom} Z`;
-  return path;
-}
-
-function buildStepLinePath(
-  points: DepthPoint[],
-  projectX: (price: number) => number,
-  projectY: (depth: number) => number,
-) {
-  if (!points.length) return "";
-
-  const first = points[0];
-  let path = `M ${projectX(first.price)} ${projectY(first.cumulative)}`;
-  for (let index = 1; index < points.length; index += 1) {
-    const point = points[index];
-    path += ` H ${projectX(point.price)} V ${projectY(point.cumulative)}`;
-  }
-  return path;
-}
-
 function formatVolume(value: number | null) {
   if (value == null || !Number.isFinite(value)) return "--";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
@@ -165,6 +74,7 @@ function aggregateBuckets(
   levels: OrderbookSide,
   side: "bids" | "asks",
   bucketSize = LADDER_BUCKET_SIZE,
+  limit = LADDER_BUCKET_ROWS,
 ) {
   const buckets = new Map<number, number>();
 
@@ -179,67 +89,58 @@ function aggregateBuckets(
   return [...buckets.entries()]
     .map(([price, totalSize]) => ({ price, totalSize }))
     .sort((a, b) => (side === "bids" ? b.price - a.price : a.price - b.price))
-    .slice(0, LADDER_BUCKET_ROWS);
+    .slice(0, limit);
 }
 
-function buildDepthSeries(orderbook: unknown): DepthSeries {
+function buildDepthSeries(orderbook: unknown): DistributionSeries {
   const { bids, asks } = extractBook(orderbook);
-  const bidCurve = buildCumulativeBids(bids);
-  const askCurve = buildCumulativeAsks(asks);
-  const bestBid = bidCurve[0]?.price ?? null;
-  const bestAsk = askCurve[0]?.price ?? null;
+  const bidBuckets = aggregateBuckets(bids, "bids", LADDER_BUCKET_SIZE, CHART_BUCKET_ROWS);
+  const askBuckets = aggregateBuckets(asks, "asks", LADDER_BUCKET_SIZE, CHART_BUCKET_ROWS);
+  const bestBid = bidBuckets[0]?.price ?? null;
+  const bestAsk = askBuckets[0]?.price ?? null;
   const midPrice =
     bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
   const maxDistanceFromMid = midPrice == null
     ? 1
     : Math.max(
-        midPrice - (bidCurve[bidCurve.length - 1]?.price ?? bestBid ?? midPrice),
-        (askCurve[askCurve.length - 1]?.price ?? bestAsk ?? midPrice) - midPrice,
+        midPrice - (bidBuckets[bidBuckets.length - 1]?.price ?? bestBid ?? midPrice),
+        (askBuckets[askBuckets.length - 1]?.price ?? bestAsk ?? midPrice) - midPrice,
         (midPrice - bestBid),
         (bestAsk - midPrice),
         1e-6,
       );
-  const maxDepth = Math.max(
-    bidCurve[bidCurve.length - 1]?.cumulative ?? 0,
-    askCurve[askCurve.length - 1]?.cumulative ?? 0,
+  const maxSize = Math.max(
+    ...bidBuckets.map((bucket) => bucket.totalSize),
+    ...askBuckets.map((bucket) => bucket.totalSize),
     1,
   );
-  const centerX = MARGIN.left + PLOT_WIDTH / 2;
-  const halfWidth = PLOT_WIDTH / 2;
-  const projectX = (price: number) => {
-    if (midPrice == null) {
-      return centerX;
-    }
-    const distance = price - midPrice;
-    const normalized = Math.min(Math.abs(distance) / maxDistanceFromMid, 1);
-    if (distance < 0) {
-      return centerX - normalized * halfWidth;
-    }
-    return centerX + normalized * halfWidth;
-  };
 
   return {
-    bids: compressDepthPoints(bidCurve, projectX, "bids"),
-    asks: compressDepthPoints(askCurve, projectX, "asks"),
+    bids: bidBuckets,
+    asks: askBuckets,
     bestBid,
     bestAsk,
     midPrice,
     maxDistanceFromMid,
-    maxDepth,
-    bidLevels: bidCurve.length,
-    askLevels: askCurve.length,
+    maxSize,
+    bidLevels: bids.length,
+    askLevels: asks.length,
   };
 }
 
 export function DepthChart({
   orderbook,
+  market,
   className,
 }: {
   orderbook: unknown;
+  market?: DashboardSnapshot["market"];
   className?: string;
 }) {
   const series = useMemo(() => buildDepthSeries(orderbook), [orderbook]);
   const { bids: rawBids, asks: rawAsks } = useMemo(() => extractBook(orderbook), [orderbook]);
+  const orderbookRoot = (orderbook ?? {}) as Record<string, unknown>;
+  const bookAssetId = typeof orderbookRoot.asset_id === "string" ? orderbookRoot.asset_id : null;
   const hasBook = series.bids.length > 0 && series.asks.length > 0;
   const bidBuckets = useMemo(() => aggregateBuckets(rawBids, "bids"), [rawBids]);
   const askBuckets = useMemo(() => aggregateBuckets(rawAsks, "asks"), [rawAsks]);
@@ -262,26 +163,39 @@ export function DepthChart({
     }
     return centerX + normalized * halfWidth;
   };
-  const projectY = (depth: number) =>
-    MARGIN.top + PLOT_HEIGHT - (depth / Math.max(series.maxDepth, 1e-9)) * PLOT_HEIGHT;
-
-  const bidAreaPath = hasBook ? buildStepAreaPath(series.bids, projectX, projectY) : "";
-  const askAreaPath = hasBook ? buildStepAreaPath(series.asks, projectX, projectY) : "";
-  const bidLinePath = hasBook ? buildStepLinePath(series.bids, projectX, projectY) : "";
-  const askLinePath = hasBook ? buildStepLinePath(series.asks, projectX, projectY) : "";
+  const projectY = (size: number) =>
+    MARGIN.top + PLOT_HEIGHT - (size / Math.max(series.maxSize, 1e-9)) * PLOT_HEIGHT;
+  const barWidth = Math.max((halfWidth / CHART_BUCKET_ROWS) * 0.8, 4);
 
   const spread =
     series.bestBid != null && series.bestAsk != null ? Math.max(series.bestAsk - series.bestBid, 0) : null;
   const mid = series.midPrice;
-  const bidDepth = series.bids[series.bids.length - 1]?.cumulative ?? null;
-  const askDepth = series.asks[series.asks.length - 1]?.cumulative ?? null;
+  const bidDepth = series.bids.reduce((sum, bucket) => sum + bucket.totalSize, 0) || null;
+  const askDepth = series.asks.reduce((sum, bucket) => sum + bucket.totalSize, 0) || null;
   const imbalance =
     bidDepth != null && askDepth != null && bidDepth + askDepth > 0 ? bidDepth / (bidDepth + askDepth) : null;
 
   const yTicks = [0.25, 0.5, 0.75, 1].map((ratio) => ({
     y: MARGIN.top + PLOT_HEIGHT - PLOT_HEIGHT * ratio,
-    value: series.maxDepth * ratio,
+    value: series.maxSize * ratio,
   }));
+
+  const sharePrices = useMemo(() => {
+    const marketPrice = market?.latest_market_price;
+    const active = market?.active;
+    if (marketPrice == null || !Number.isFinite(marketPrice)) return null;
+
+    const yesPrice =
+      bookAssetId && active?.yes_token_id && bookAssetId === active.yes_token_id ? marketPrice
+      : bookAssetId && active?.no_token_id && bookAssetId === active.no_token_id ? 1 - marketPrice
+      : marketPrice;
+    const noPrice = 1 - yesPrice;
+
+    return {
+      yes: yesPrice,
+      no: noPrice,
+    };
+  }, [bookAssetId, market]);
 
   return (
     <Card className={cn("xl:col-span-7", className)}>
@@ -291,22 +205,17 @@ export function DepthChart({
           <h2 className="mt-1.5 text-xl font-semibold">Order book depth</h2>
         </div>
         <div className="text-right text-xs text-muted-foreground">
-          {hasBook ? `Cumulative depth across ${series.bidLevels + series.askLevels} levels` : "Awaiting Polymarket depth snapshot"}
+          {hasBook ? `Resting order distribution across ${series.bidLevels + series.askLevels} levels` : "Awaiting Polymarket depth snapshot"}
         </div>
       </div>
+      {sharePrices ? (
+        <div className="mb-3 grid gap-2 md:grid-cols-2">
+          <SharePriceCard label="YES" value={sharePrices.yes} tone="yes" />
+          <SharePriceCard label="NO" value={sharePrices.no} tone="no" />
+        </div>
+      ) : null}
       {hasBook ? (
         <svg viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`} className="h-[220px] w-full">
-          <defs>
-            <linearGradient id="bidFill" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#22c55e" stopOpacity="0.38" />
-              <stop offset="100%" stopColor="#22c55e" stopOpacity="0.04" />
-            </linearGradient>
-            <linearGradient id="askFill" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#fb7185" stopOpacity="0.38" />
-              <stop offset="100%" stopColor="#fb7185" stopOpacity="0.04" />
-            </linearGradient>
-          </defs>
-
           {yTicks.map((tick) => (
             <g key={tick.value}>
               <line
@@ -334,10 +243,38 @@ export function DepthChart({
             />
           ) : null}
 
-          <path d={bidAreaPath} fill="url(#bidFill)" />
-          <path d={askAreaPath} fill="url(#askFill)" />
-          <path d={bidLinePath} fill="none" stroke="#22c55e" strokeWidth="2.2" strokeLinejoin="round" />
-          <path d={askLinePath} fill="none" stroke="#fb7185" strokeWidth="2.2" strokeLinejoin="round" />
+          {series.bids.map((bucket) => {
+            const x = projectX(bucket.price) - barWidth;
+            const y = projectY(bucket.totalSize);
+            const height = VIEWBOX_HEIGHT - MARGIN.bottom - y;
+            return (
+              <rect
+                key={`bid-bar-${bucket.price}`}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={Math.max(height, 1)}
+                rx="2"
+                fill="rgba(34,197,94,0.7)"
+              />
+            );
+          })}
+          {series.asks.map((bucket) => {
+            const x = projectX(bucket.price);
+            const y = projectY(bucket.totalSize);
+            const height = VIEWBOX_HEIGHT - MARGIN.bottom - y;
+            return (
+              <rect
+                key={`ask-bar-${bucket.price}`}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={Math.max(height, 1)}
+                rx="2"
+                fill="rgba(251,113,133,0.7)"
+              />
+            );
+          })}
 
           <text
             x={series.bestBid != null ? projectX(series.bestBid) : MARGIN.left}
@@ -400,6 +337,24 @@ export function DepthChart({
         <DepthMetric label="Bid imbalance" value={imbalance != null ? `${Math.round(imbalance * 100)}%` : "--"} />
       </div>
     </Card>
+  );
+}
+
+function SharePriceCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "yes" | "no";
+}) {
+  const toneClass = tone === "yes" ? "border-emerald-400/20 bg-emerald-500/10" : "border-rose-400/20 bg-rose-500/10";
+  return (
+    <div className={`flex items-center justify-between rounded-lg border px-2.5 py-1 ${toneClass}`}>
+      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
+      <div className="text-sm font-semibold leading-none text-foreground">{Math.round(value * 100)}c</div>
+    </div>
   );
 }
 

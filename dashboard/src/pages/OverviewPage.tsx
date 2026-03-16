@@ -13,8 +13,8 @@ export function OverviewPage() {
     <div className="space-y-4">
       <HealthStrip snapshot={snapshot} />
       <div className="panel-grid">
-        <PriceComparisonChart snapshot={snapshot} />
-        <DepthChart orderbook={snapshot.market.orderbook_snapshot} className="xl:col-span-5" />
+        <PriceComparisonChart snapshot={snapshot} className="xl:col-span-6" />
+        <DepthChart orderbook={snapshot.market.orderbook_snapshot} market={snapshot.market} className="xl:col-span-6" />
         <UpstreamSummaryPanel feeds={snapshot.feeds} />
         <StreamingPanel snapshot={snapshot} />
         <AlertRail alerts={snapshot.alerts} />

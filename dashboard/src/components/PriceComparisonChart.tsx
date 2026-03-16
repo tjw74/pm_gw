@@ -49,6 +49,7 @@ export function PriceComparisonChart({
         };
       })
       .filter((entry): entry is SeriesMeta => entry !== null)
+      .filter((entry) => !entry.key.startsWith("polymarket_clob"))
       .sort((a, b) => a.key.localeCompare(b.key));
   }, [snapshot.feeds, snapshot.market.price_history]);
 
@@ -65,7 +66,7 @@ export function PriceComparisonChart({
   }, [seriesData]);
 
   useEffect(() => {
-    if (!containerRef.current || !seriesData.length) return;
+    if (!containerRef.current || !seriesData.length || !anchor) return;
     const chart = createChart(containerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
@@ -85,7 +86,7 @@ export function PriceComparisonChart({
     seriesData.forEach((entry) => {
       const series = chart.addLineSeries({
         color: entry.color,
-        lineWidth: entry.key === "polymarket_clob" ? 3 : 2,
+        lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
       });
@@ -115,10 +116,10 @@ export function PriceComparisonChart({
         <div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Price alignment</div>
           <h2 className="mt-1.5 text-xl font-semibold">Source comparison</h2>
-          <div className="mt-1 text-xs text-muted-foreground">Relative basis-point offset versus the live cross-source median.</div>
+          <div className="mt-1 text-xs text-muted-foreground">BTC spot sources aligned against the live cross-source median.</div>
         </div>
         <div className="rounded-2xl border border-white/5 bg-black/10 px-3 py-2 text-right">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Divergence</div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Spot divergence</div>
           <div className="mt-1.5 text-base font-semibold">{divergence == null ? "--" : divergence.toFixed(2)}</div>
         </div>
       </div>
@@ -126,7 +127,7 @@ export function PriceComparisonChart({
         <div ref={containerRef} />
       ) : (
           <div className="flex h-[240px] items-center justify-center rounded-3xl border border-dashed border-white/10 bg-black/10 text-sm text-muted-foreground">
-          Waiting for valid price history from upstream sources.
+          Waiting for valid comparable spot price history from upstream sources.
         </div>
       )}
       {anchor ? (

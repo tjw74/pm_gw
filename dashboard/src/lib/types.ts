@@ -46,6 +46,8 @@ export interface DashboardSnapshot {
     active?: {
       slug: string;
       question?: string | null;
+      yes_token_id?: string | null;
+      no_token_id?: string | null;
       window: {
         window_start: string;
         window_end: string;

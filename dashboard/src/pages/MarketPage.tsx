@@ -25,7 +25,7 @@ export function MarketPage() {
       </Card>
       <div className="panel-grid">
         <PriceComparisonChart snapshot={snapshot} />
-        <DepthChart orderbook={snapshot.market.orderbook_snapshot} />
+        <DepthChart orderbook={snapshot.market.orderbook_snapshot} market={snapshot.market} />
       </div>
     </div>
   );
