@@ -1,0 +1,14 @@
+hzyshd.io {
+    encode zstd gzip
+
+    redir /trade /trade/ 308
+
+    handle_path /trade* {
+        reverse_proxy 127.0.0.1:4174
+    }
+
+    @gateway path /api/* /ws /ws/* /healthz /readyz
+    reverse_proxy @gateway 127.0.0.1:8080
+
+    reverse_proxy 127.0.0.1:4173
+}

@@ -52,6 +52,26 @@ pub struct GatewayState {
     pub target_price: Option<f64>,
     pub seen_commands: HashMap<Uuid, OffsetDateTime>,
     pub user_rate_window: HashMap<String, Vec<OffsetDateTime>>,
+    pub portfolio_history: HashMap<String, Vec<PortfolioPoint>>,
+    pub position_history: HashMap<String, Vec<PositionHistoryEntry>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PortfolioPoint {
+    pub timestamp: OffsetDateTime,
+    pub portfolio_value: f64,
+    pub unrealized_pnl: Option<f64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PositionHistoryEntry {
+    pub timestamp: OffsetDateTime,
+    pub market_slug: String,
+    pub outcome: String,
+    pub size: f64,
+    pub average_price: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub status: String,
 }
 
 impl AppState {
@@ -130,6 +150,7 @@ impl AppState {
     pub async fn set_active_market(&self, market: ActiveMarket) {
         {
             let mut inner = self.inner.write().await;
+            inner.target_price = reference_midpoint(&inner.latest_reference_prices);
             inner.active_market = Some(market.clone());
         }
         self.ready.store(true, Ordering::Relaxed);
@@ -330,8 +351,19 @@ impl AppState {
                 wallet_id: user_id.to_string(),
                 positions: HashMap::new(),
             });
+        let current_positions = positions.clone();
+        let total_unrealized_pnl = aggregate_unrealized_pnl(&positions);
+        let now = OffsetDateTime::now_utc();
 
         let mut inner = self.inner.write().await;
+        let previous_positions = inner
+            .positions
+            .get(user_id)
+            .cloned()
+            .unwrap_or_else(|| PositionState {
+                wallet_id: user_id.to_string(),
+                positions: HashMap::new(),
+            });
         inner.accounts.insert(
             user_id.to_string(),
             AccountSummary {
@@ -343,6 +375,33 @@ impl AppState {
         );
         inner.active_orders.insert(user_id.to_string(), orders);
         inner.positions.insert(user_id.to_string(), positions);
+        if let Some(value) = portfolio_value {
+            let history = inner.portfolio_history.entry(user_id.to_string()).or_default();
+            let should_push = history
+                .last()
+                .map(|point| {
+                    (now - point.timestamp).whole_seconds() >= 10
+                        || (point.portfolio_value - value).abs() >= 0.01
+                        || point.unrealized_pnl != total_unrealized_pnl
+                })
+                .unwrap_or(true);
+            if should_push {
+                history.push(PortfolioPoint {
+                    timestamp: now,
+                    portfolio_value: value,
+                    unrealized_pnl: total_unrealized_pnl,
+                });
+                trim_vec(history, 180);
+            }
+        }
+        record_position_history(
+            inner.position_history.entry(user_id.to_string()).or_default(),
+            &previous_positions,
+            &current_positions,
+            now,
+        );
+        drop(inner);
+        self.refresh_snapshot().await;
     }
 
     pub async fn record_feed_message(
@@ -477,6 +536,62 @@ impl AppState {
                 "active_orders": inner.active_orders,
                 "positions": inner.positions,
                 "audit": ops.audit_log,
+            }
+        })
+    }
+
+    pub async fn user_trade_snapshot(&self, user_id: &str) -> serde_json::Value {
+        let inner = self.inner.read().await;
+        let active_market = inner.active_market.clone();
+        let target_price = inner.target_price;
+        let latest_market_price = inner.latest_market_price;
+        let latest_reference_prices = inner.latest_reference_prices.clone();
+        let orderbook_snapshot = inner.orderbook_snapshot.clone();
+        let account = inner.accounts.get(user_id).cloned();
+        let positions = inner.positions.get(user_id).cloned();
+        let active_orders = inner.active_orders.get(user_id).cloned().unwrap_or_default();
+        let portfolio_history = inner
+            .portfolio_history
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        let position_history = inner
+            .position_history
+            .get(user_id)
+            .cloned()
+            .unwrap_or_default();
+        drop(inner);
+        let price_history = self.ops.read().await.price_history.clone();
+        let unrealized_pnl = positions
+            .as_ref()
+            .and_then(aggregate_unrealized_pnl);
+        let portfolio_value = account.as_ref().and_then(|value| value.portfolio_value);
+        let cash_balance = account.as_ref().and_then(|value| value.cash_balance);
+        json!({
+            "meta": {
+                "generated_at": OffsetDateTime::now_utc(),
+                "ready": self.is_ready(),
+                "user_id": user_id,
+            },
+            "market": {
+                "active": active_market,
+                "target_price": target_price,
+                "latest_market_price": latest_market_price,
+                "latest_reference_prices": latest_reference_prices,
+                "orderbook_snapshot": orderbook_snapshot,
+                "price_history": price_history,
+            },
+            "account": {
+                "summary": account,
+                "profitability": {
+                    "portfolio_value": portfolio_value,
+                    "cash_balance": cash_balance,
+                    "unrealized_pnl": unrealized_pnl,
+                },
+                "open_orders": active_orders,
+                "positions": positions,
+                "portfolio_history": portfolio_history,
+                "position_history": position_history,
             }
         })
     }
@@ -803,5 +918,96 @@ fn parse_f64(value: &serde_json::Value) -> Option<f64> {
         serde_json::Value::Number(number) => number.as_f64(),
         serde_json::Value::String(text) => text.parse::<f64>().ok(),
         _ => None,
+    }
+}
+
+fn reference_midpoint(values: &HashMap<String, f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut entries = values.values().copied().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let middle = entries.len() / 2;
+    if entries.len() % 2 == 1 {
+        entries.get(middle).copied()
+    } else {
+        Some((entries[middle - 1] + entries[middle]) / 2.0)
+    }
+}
+
+fn aggregate_unrealized_pnl(positions: &PositionState) -> Option<f64> {
+    let mut total = 0.0;
+    let mut found = false;
+    for position in positions.positions.values() {
+        if let Some(value) = position.unrealized_pnl {
+            total += value;
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+fn record_position_history(
+    history: &mut Vec<PositionHistoryEntry>,
+    previous: &PositionState,
+    current: &PositionState,
+    timestamp: OffsetDateTime,
+) {
+    for (key, position) in &current.positions {
+        let status = match previous.positions.get(key) {
+            None => Some("opened"),
+            Some(existing) if position_changed(existing, position) => Some("updated"),
+            _ => None,
+        };
+        if let Some(status) = status {
+            history.push(PositionHistoryEntry {
+                timestamp,
+                market_slug: position.market_slug.clone(),
+                outcome: position.outcome.clone(),
+                size: position.size,
+                average_price: position.average_price,
+                unrealized_pnl: position.unrealized_pnl,
+                status: status.to_string(),
+            });
+        }
+    }
+
+    for (key, position) in &previous.positions {
+        if !current.positions.contains_key(key) {
+            history.push(PositionHistoryEntry {
+                timestamp,
+                market_slug: position.market_slug.clone(),
+                outcome: position.outcome.clone(),
+                size: position.size,
+                average_price: position.average_price,
+                unrealized_pnl: position.unrealized_pnl,
+                status: "closed".to_string(),
+            });
+        }
+    }
+
+    trim_vec(history, 60);
+}
+
+fn position_changed(left: &Position, right: &Position) -> bool {
+    left.market_slug != right.market_slug
+        || left.outcome != right.outcome
+        || (left.size - right.size).abs() >= 0.0001
+        || option_changed(left.average_price, right.average_price)
+        || option_changed(left.unrealized_pnl, right.unrealized_pnl)
+}
+
+fn option_changed(left: Option<f64>, right: Option<f64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).abs() >= 0.0001,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn trim_vec<T>(entries: &mut Vec<T>, max_len: usize) {
+    if entries.len() > max_len {
+        let overflow = entries.len() - max_len;
+        entries.drain(0..overflow);
     }
 }

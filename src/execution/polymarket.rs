@@ -38,6 +38,12 @@ impl PolymarketExecutionClient {
         Ok(())
     }
 
+    pub async fn sync_user_state_for(&self, user_id: &str) -> Result<(), GatewayError> {
+        let user = self.state.auth.polymarket_user(user_id)?;
+        self.fetch_account_state(&user).await?;
+        Ok(())
+    }
+
     pub async fn handle_command(
         &self,
         user_id: &str,
@@ -65,8 +71,11 @@ impl PolymarketExecutionClient {
                     "price": price,
                     "order_type": "limit",
                 });
-                self.signed_request(&user, Method::POST, "/order", Some(payload))
-                    .await
+                let response = self
+                    .signed_request(&user, Method::POST, "/order", Some(payload))
+                    .await?;
+                let _ = self.fetch_account_state(&user).await;
+                Ok(response)
             }
             ClientMessage::PlaceMarketOrder {
                 side,
@@ -84,26 +93,35 @@ impl PolymarketExecutionClient {
                     "size": size,
                     "order_type": "market",
                 });
-                self.signed_request(&user, Method::POST, "/order", Some(payload))
-                    .await
+                let response = self
+                    .signed_request(&user, Method::POST, "/order", Some(payload))
+                    .await?;
+                let _ = self.fetch_account_state(&user).await;
+                Ok(response)
             }
             ClientMessage::CancelOrder { order_id, .. } => {
-                self.signed_request(
+                let response = self
+                    .signed_request(
                     &user,
                     Method::POST,
                     "/cancel",
                     Some(json!({ "order_id": order_id })),
                 )
-                .await
+                .await?;
+                let _ = self.fetch_account_state(&user).await;
+                Ok(response)
             }
             ClientMessage::CancelAll { .. } => {
-                self.signed_request(
+                let response = self
+                    .signed_request(
                     &user,
                     Method::POST,
                     "/cancel-all",
                     Some(json!({ "market": self.state.active_market_slug().await })),
                 )
-                .await
+                .await?;
+                let _ = self.fetch_account_state(&user).await;
+                Ok(response)
             }
             ClientMessage::GetOpenOrders { .. } => {
                 self.signed_request(&user, Method::GET, "/orders", None)

@@ -76,7 +76,7 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
     sender
         .send(Message::Text(
             serde_json::to_string(&ServerMessage::Snapshot {
-                payload: state.snapshot().await,
+                payload: state.user_trade_snapshot(&auth_user.user_id).await,
             })
             .map_err(|err| GatewayError::internal(err.to_string()))?
             .into(),
@@ -94,6 +94,18 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
         loop {
             ticker.tick().await;
             heartbeat_state.touch_session(heartbeat_session_id).await;
+        }
+    });
+    let sync_state = state.clone();
+    let sync_execution = execution.clone();
+    let sync_user_id = auth_user.user_id.clone();
+    let sync_task = tokio::spawn(async move {
+        let _ = sync_execution.sync_user_state_for(&sync_user_id).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            ticker.tick().await;
+            let _ = sync_execution.sync_user_state_for(&sync_user_id).await;
+            sync_state.refresh_snapshot().await;
         }
     });
 
@@ -123,8 +135,16 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         state.record_stream_drop().await;
-                        let snapshot = snapshot_rx.borrow().clone();
-                        if send_message(&mut sender, &state, &ServerMessage::Snapshot { payload: snapshot }).await.is_err() {
+                        if send_message(
+                            &mut sender,
+                            &state,
+                            &ServerMessage::Snapshot {
+                                payload: state.user_trade_snapshot(&auth_user.user_id).await,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
                     }
@@ -135,7 +155,7 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
                 if changed.is_err() {
                     break;
                 }
-                let payload = snapshot_rx.borrow().clone();
+                let payload = state.user_trade_snapshot(&auth_user.user_id).await;
                 if send_message(&mut sender, &state, &ServerMessage::Snapshot { payload }).await.is_err() {
                     break;
                 }
@@ -144,6 +164,7 @@ async fn process_socket(socket: WebSocket, state: Arc<AppState>) -> Result<(), G
     }
 
     heartbeat_task.abort();
+    sync_task.abort();
     state.remove_session(session.id).await;
     Ok(())
 }
@@ -212,7 +233,7 @@ async fn route_command(
                 sender,
                 state,
                 &ServerMessage::Snapshot {
-                    payload: state.snapshot().await,
+                    payload: state.user_trade_snapshot(&auth_user.user_id).await,
                 },
             )
             .await?;
@@ -261,7 +282,11 @@ async fn route_command(
             let payload = execution
                 .handle_command(&auth_user.user_id, &command)
                 .await?;
-            send_message(sender, state, &ServerMessage::Snapshot { payload }).await
+            let snapshot = serde_json::json!({
+                "command_result": payload,
+                "snapshot": state.user_trade_snapshot(&auth_user.user_id).await,
+            });
+            send_message(sender, state, &ServerMessage::Snapshot { payload: snapshot }).await
         }
         ClientMessage::Ping { .. } => {
             send_message(

@@ -13,6 +13,7 @@ mod observability;
 mod responses;
 mod session;
 mod state;
+mod trade_api;
 mod types;
 mod util;
 mod ws_server;
@@ -37,6 +38,7 @@ use crate::{
     health::{healthz, readyz},
     market_scheduler::spawn_market_scheduler,
     state::AppState,
+    trade_api::{trade_refresh, trade_session},
     ws_server::ws_route,
 };
 
@@ -65,6 +67,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_route))
+        .route("/ws/trade", get(ws_route))
         .route("/ws/dashboard/public", get(dashboard_public_ws))
         .route("/ws/dashboard/admin", get(dashboard_admin_ws))
         .route("/healthz", get(healthz))
@@ -74,6 +77,8 @@ async fn main() -> Result<()> {
         .route("/api/public/market", get(public_market))
         .route("/api/public/streaming", get(public_streaming))
         .route("/api/public/alerts", get(public_alerts))
+        .route("/api/trade/session", get(trade_session))
+        .route("/api/trade/refresh", post(trade_refresh))
         .route("/api/admin/login", post(admin_login))
         .route("/api/admin/me", get(admin_me))
         .route("/api/admin/status", get(admin_status))

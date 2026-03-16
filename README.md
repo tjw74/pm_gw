@@ -14,6 +14,7 @@ For Polymarket credentials, v1 only requires each developer user's wallet privat
 - Polymarket REST execution client for high-level trade and account commands
 - In-memory observability layer for feed freshness, reconnect counts, price history, downstream throughput, alerts, and audit trail
 - Public read-only operator dashboard in `dashboard/`
+- Separate mobile-first trade PWA in `trade_app/`
 - JWT-protected admin mode with runtime kill switch control
 - In-memory state cache only, no database
 - Deployment examples for `systemd` and Caddy
@@ -38,6 +39,17 @@ npm run dev
 
 The dashboard expects the gateway API at `http://localhost:8080` by default and serves on `http://localhost:4173`.
 
+Run the trade PWA locally:
+
+```bash
+cd trade_app
+cp .env.example .env
+npm install
+npm run dev
+```
+
+The trade app serves on `http://localhost:4174` and expects the gateway at the same host by default.
+
 ## Dashboard API
 
 Public:
@@ -48,6 +60,12 @@ Public:
 - `GET /api/public/streaming`
 - `GET /api/public/alerts`
 - `GET /ws/dashboard/public`
+
+Trade:
+
+- `GET /api/trade/session`
+- `POST /api/trade/refresh`
+- `GET /ws/trade`
 
 Admin:
 
@@ -82,6 +100,8 @@ First message:
 ```json
 {"type":"auth","token":"<token>"}
 ```
+
+The same user token flow is used by the trade PWA. Tokens map to backend-configured user contexts like `dev_user1` and `dev_user2`, and the backend keeps the Polymarket private keys server-side.
 
 Example trade command:
 
@@ -127,6 +147,15 @@ npm run build
 docker build -t pm_gw_dashboard .
 ```
 
+Build the trade app container:
+
+```bash
+cd trade_app
+npm install
+npm run build
+docker build -t pm_gw_trade .
+```
+
 Run the dashboard container with Compose:
 
 ```bash
@@ -135,6 +164,7 @@ docker compose -f deploy/docker-compose.dashboard.yml up -d --build
 
 Reverse proxy example:
 
+- route `/trade*` to the trade app container
 - route `/api/*`, `/ws`, `/ws/dashboard/*`, `/healthz`, and `/readyz` to `pm_gw`
 - route all other paths to the dashboard container
 - see [deploy/Caddyfile.example](/home/hzyshd/code/pm_gw/deploy/Caddyfile.example)

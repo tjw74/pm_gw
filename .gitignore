@@ -2,3 +2,6 @@
 .env
 dashboard/.env
 dashboard/node_modules/
+trade_app/node_modules/
+trade_app/dist/
+trade_app/*.tsbuildinfo
